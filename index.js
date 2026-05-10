@@ -90,9 +90,9 @@ async function parseWithClaude(text) {
   const clean = raw.replace(/```json|```/g, '').trim();
   const parsed = JSON.parse(clean);
   parsed.segments = (parsed.segments || []).map((s, i) => ({
-    ...s,
-  id: `seg-${Date.now()}-${i}-${Math.random().toString(36).substr(2, 6)}`,
-  }));
+  ...s,
+  id: `seg-${Date.now()}-${i}-${Math.random().toString(36).substr(2, 9)}`,
+}));
   return parsed;
 }
 
