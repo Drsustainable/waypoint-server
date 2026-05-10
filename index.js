@@ -7,12 +7,13 @@ const fetch = require('node-fetch');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
-const DATA_FILE = '/app/data/trips.json';
-// ── Middleware ────────────────────────────────────────────────────────────────
+const DATA_FILE = process.env.RAILWAY_VOLUME_MOUNT_PATH
+  ? path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH, 'trips.json')
+  : path.join(__dirname, 'data', 'trips.json');
+
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// ── Data storage (simple JSON file) ──────────────────────────────────────────
 function ensureDataDir() {
   const dir = path.dirname(DATA_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -21,11 +22,8 @@ function ensureDataDir() {
 
 function readTrips() {
   ensureDataDir();
-  try {
-    return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-  } catch {
-    return [];
-  }
+  try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }
+  catch { return []; }
 }
 
 function writeTrips(trips) {
@@ -33,17 +31,19 @@ function writeTrips(trips) {
   fs.writeFileSync(DATA_FILE, JSON.stringify(trips, null, 2));
 }
 
-// ── Claude parser ─────────────────────────────────────────────────────────────
-const SYSTEM_PROMPT = `You are a travel booking parser. Given text from booking confirmations (emails, PDFs, or any format), extract all travel segments and return ONLY valid JSON — no markdown, no preamble.
+function uniqueId(i) {
+  return `seg-${Date.now()}-${i}-${Math.random().toString(36).substr(2, 9)}`;
+}
+
+const SYSTEM_PROMPT = `You are a travel booking parser. Given text from booking confirmations, extract all travel segments and return ONLY valid JSON — no markdown, no preamble.
 
 Return:
 {
   "tripName": "short name from destinations e.g. 'Newcastle / Seville'",
   "segments": [
     {
-      "id": "seg-<unique number>",
       "type": "flight|train|hotel|car_hire|ferry|taxi|meeting|activity|bus",
-      "title": "short label e.g. 'NCL → AMS'",
+      "title": "short label e.g. 'NCL -> AMS'",
       "confirmationRef": "booking reference or null",
       "provider": "airline/hotel/operator or null",
       "startDateTime": "ISO 8601 datetime",
@@ -62,14 +62,11 @@ Rules:
 - Never invent information not in the text`;
 
 async function parseWithClaude(text) {
-  const apiKey = CLAUDE_API_KEY;
-  if (!apiKey) throw new Error('CLAUDE_API_KEY not set on server');
-
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-api-key': apiKey,
+      'x-api-key': CLAUDE_API_KEY,
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
@@ -89,14 +86,10 @@ async function parseWithClaude(text) {
   const raw = data.content?.[0]?.text || '';
   const clean = raw.replace(/```json|```/g, '').trim();
   const parsed = JSON.parse(clean);
-  parsed.segments = (parsed.segments || []).map((s, i) => ({
-  ...s,
-  id: `seg-${Date.now()}-${i}-${Math.random().toString(36).substr(2, 9)}`,
-}));
+  // Always generate fresh unique IDs — never trust what Claude returns
+  parsed.segments = (parsed.segments || []).map((s, i) => ({ ...s, id: uniqueId(i) }));
   return parsed;
 }
-
-// ── Routes ────────────────────────────────────────────────────────────────────
 
 // Health check
 app.get('/health', (req, res) => {
@@ -104,9 +97,7 @@ app.get('/health', (req, res) => {
 });
 
 // GET all trips
-app.get('/trips', (req, res) => {
-  res.json(readTrips());
-});
+app.get('/trips', (req, res) => res.json(readTrips()));
 
 // GET single trip
 app.get('/trips/:id', (req, res) => {
@@ -118,11 +109,7 @@ app.get('/trips/:id', (req, res) => {
 // POST create trip
 app.post('/trips', (req, res) => {
   const trips = readTrips();
-  const trip = {
-    id: Date.now().toString(),
-    createdAt: new Date().toISOString(),
-    ...req.body,
-  };
+  const trip = { id: Date.now().toString(), createdAt: new Date().toISOString(), ...req.body };
   trips.push(trip);
   writeTrips(trips);
   res.status(201).json(trip);
@@ -147,17 +134,19 @@ app.delete('/trips/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// POST add segments to existing trip
+// POST add segments to trip
 app.post('/trips/:id/segments', (req, res) => {
   const trips = readTrips();
   const idx = trips.findIndex(t => t.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
-  trips[idx].segments = [...(trips[idx].segments || []), ...req.body.segments];
+  // Force unique IDs on incoming segments
+  const newSegments = (req.body.segments || []).map((s, i) => ({ ...s, id: uniqueId(i) }));
+  trips[idx].segments = [...(trips[idx].segments || []), ...newSegments];
   writeTrips(trips);
   res.json(trips[idx]);
 });
 
-// DELETE segment from trip
+// DELETE segment
 app.delete('/trips/:id/segments/:segId', (req, res) => {
   const trips = readTrips();
   const idx = trips.findIndex(t => t.id === req.params.id);
@@ -167,74 +156,45 @@ app.delete('/trips/:id/segments/:segId', (req, res) => {
   res.json(trips[idx]);
 });
 
-// POST parse text with Claude
+// POST parse text
 app.post('/parse', async (req, res) => {
   const { text } = req.body;
   if (!text?.trim()) return res.status(400).json({ error: 'No text provided' });
-
-  try {
-    const result = await parseWithClaude(text);
-    res.json(result);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  try { res.json(await parseWithClaude(text)); }
+  catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// POST parse base64 PDF with Claude
+// POST parse PDF
 app.post('/parse-pdf', async (req, res) => {
   const { base64, filename } = req.body;
   if (!base64) return res.status(400).json({ error: 'No PDF data provided' });
-
   try {
-    // Use Claude's document understanding directly
-    const apiKey = CLAUDE_API_KEY;
-    if (!apiKey) throw new Error('CLAUDE_API_KEY not set on server');
-
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
+      headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
         model: 'claude-sonnet-4-5',
         max_tokens: 2000,
         system: SYSTEM_PROMPT,
-        messages: [{
-          role: 'user',
-          content: [
-            {
-              type: 'document',
-              source: { type: 'base64', media_type: 'application/pdf', data: base64 },
-            },
-            { type: 'text', text: 'Parse all travel bookings from this document.' },
-          ],
-        }],
+        messages: [{ role: 'user', content: [
+          { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } },
+          { type: 'text', text: 'Parse all travel bookings from this document.' }
+        ]}],
       }),
     });
-
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}));
-      throw new Error(`Claude API error ${response.status}: ${err.error?.message || 'unknown'}`);
-    }
-
+    if (!response.ok) { const err = await response.json().catch(()=>({})); throw new Error(`Claude API error ${response.status}: ${err.error?.message||'unknown'}`); }
     const data = await response.json();
     const raw = data.content?.[0]?.text || '';
     const clean = raw.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
-    parsed.segments = (parsed.segments || []).map((s, i) => ({
-      ...s,
-      id: s.id || `seg-${Date.now()}-${i}`,
-    }));
+    // Always generate fresh unique IDs
+    parsed.segments = (parsed.segments || []).map((s, i) => ({ ...s, id: uniqueId(i) }));
     res.json(parsed);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`Waypoint server running on port ${PORT}`);
   console.log(`CLAUDE_API_KEY: ${CLAUDE_API_KEY ? 'set ✓' : 'MISSING ✗'}`);
+  console.log(`Data file: ${DATA_FILE}`);
 });
