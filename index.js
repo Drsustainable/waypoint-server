@@ -7,8 +7,7 @@ const fetch = require('node-fetch');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
-const DATA_FILE = path.join(__dirname, 'data', 'trips.json');
-
+const DATA_FILE = '/app/data/trips.json';
 // ── Middleware ────────────────────────────────────────────────────────────────
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
