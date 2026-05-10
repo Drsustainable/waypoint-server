@@ -92,7 +92,7 @@ async function parseWithClaude(text) {
   const parsed = JSON.parse(clean);
   parsed.segments = (parsed.segments || []).map((s, i) => ({
     ...s,
-    id: s.id || `seg-${Date.now()}-${i}`,
+  id: `seg-${Date.now()}-${i}-${Math.random().toString(36).substr(2, 6)}`,
   }));
   return parsed;
 }
